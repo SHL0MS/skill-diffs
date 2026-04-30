@@ -14,12 +14,18 @@ Output:
     data/bundled_manifest.jsonl         (per-repo run metadata)
 """
 import argparse
+import io
 import json
+import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -137,8 +143,31 @@ def get_blob_text(repo_dir, sha, path):
     return (text, size)
 
 
+def _download_tarball(repo_full, max_bytes=500 * 1024 * 1024):
+    """Download GitHub repo tarball for HEAD. Returns (tar_bytes, sha_short)."""
+    owner, name = repo_full.split("/", 1)
+    url = f"https://codeload.github.com/{owner}/{name}/tar.gz/HEAD"
+    req = urllib.request.Request(url, headers={"User-Agent": "skill-diffs/0.1"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        # Stream-read with cap
+        chunks = []
+        total = 0
+        while True:
+            chunk = resp.read(1024 * 256)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"tarball exceeds {max_bytes} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
 def extract_bundled_for_repo(repo_full, skill_paths=None):
-    """Clone repo, extract bundled resources for every skill_path we know."""
+    """Download repo tarball (1 HTTP request) and extract sibling files
+    for every known skill folder. Much faster than git clone for repos
+    with many bundled files (one network round trip vs. one per file).
+    """
     started = time.time()
     out = output_path(repo_full)
     if skill_paths is None:
@@ -152,66 +181,122 @@ def extract_bundled_for_repo(repo_full, skill_paths=None):
             "elapsed_s": 0,
         }
 
-    repo_url = f"https://github.com/{repo_full}.git"
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_dir = Path(tmp) / "repo"
-            clone_partial(repo_url, repo_dir)
-            head_sha = get_head_sha(repo_dir)
+    skill_path_set = set(skill_paths)
+    skill_dirs = {}  # skill_path -> skill_dir
+    for sp in skill_paths:
+        sd = str(Path(sp).parent)
+        if sd in (".", ""):
+            sd = ""
+        skill_dirs[sp] = sd
 
-            n_skills = 0
-            n_files = 0
-            with open(out, "w") as fp:
-                for skill_path in skill_paths:
-                    skill_dir = str(Path(skill_path).parent)
-                    if skill_dir in (".", ""):
-                        skill_dir = ""
-                    files = list_tree_files(repo_dir, head_sha, skill_dir)
-                    bundled = []
-                    for f in files:
-                        if f == skill_path:
-                            continue  # SKILL.md captured separately
-                        # Only include files actually under the skill folder
-                        if skill_dir and not f.startswith(skill_dir + "/"):
-                            continue
-                        text, size = get_blob_text(repo_dir, head_sha, f)
-                        rel_path = f[len(skill_dir) + 1:] if skill_dir else f
-                        if text is None:
-                            bundled.append({
-                                "path": rel_path,
-                                "size": size,
-                                "content": None,
-                                "binary_or_oversize": True,
-                            })
-                        else:
-                            bundled.append({
-                                "path": rel_path,
+    try:
+        tar_bytes = _download_tarball(repo_full)
+
+        # Collect bundled files indexed by (skill_path, rel_path)
+        bundled_by_skill = defaultdict(list)
+        head_sha_short = ""
+
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+            for member in tar:
+                if not member.isfile():
+                    continue
+                # Tarball entries are "<owner>-<repo>-<sha>/path/to/file"
+                parts = member.name.split("/", 1)
+                if len(parts) < 2:
+                    continue
+                if not head_sha_short:
+                    # Extract short SHA from prefix
+                    m = re.match(r".+-([0-9a-f]{7,40})$", parts[0])
+                    if m:
+                        head_sha_short = m.group(1)
+                rel_path = parts[1]
+
+                # Find which skill (if any) this file belongs to
+                for skill_path, skill_dir in skill_dirs.items():
+                    if rel_path == skill_path:
+                        continue  # SKILL.md captured separately
+                    in_dir = (
+                        (skill_dir == "" and "/" not in rel_path)
+                        or (skill_dir and rel_path.startswith(skill_dir + "/"))
+                    )
+                    if not in_dir:
+                        continue
+                    # Read the file
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    content_bytes = f.read()
+                    size = len(content_bytes)
+                    rel_in_skill = (
+                        rel_path[len(skill_dir) + 1:] if skill_dir else rel_path
+                    )
+                    if size > MAX_FILE_BYTES:
+                        bundled_by_skill[skill_path].append({
+                            "path": rel_in_skill,
+                            "size": size,
+                            "content": None,
+                            "binary_or_oversize": True,
+                        })
+                    else:
+                        try:
+                            text = content_bytes.decode("utf-8")
+                            bundled_by_skill[skill_path].append({
+                                "path": rel_in_skill,
                                 "size": size,
                                 "content": text,
                                 "binary_or_oversize": False,
                             })
-                            n_files += 1
+                        except UnicodeDecodeError:
+                            bundled_by_skill[skill_path].append({
+                                "path": rel_in_skill,
+                                "size": size,
+                                "content": None,
+                                "binary_or_oversize": True,
+                            })
+                    break  # File only belongs to one skill
 
-                    rec = {
-                        "repo": repo_full,
-                        "skill_path": skill_path,
-                        "skill_dir": skill_dir,
-                        "skill_name": Path(skill_dir).name if skill_dir else Path(skill_path).stem,
-                        "head_sha": head_sha,
-                        "bundled_files": bundled,
-                        "bundled_count": len(bundled),
-                        "bundled_text_count": sum(1 for b in bundled if not b["binary_or_oversize"]),
-                    }
-                    fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    n_skills += 1
+        # Write per-skill records
+        n_skills = 0
+        n_text_files = 0
+        with open(out, "w") as fp:
+            for skill_path in skill_paths:
+                bundled = bundled_by_skill.get(skill_path, [])
+                rec = {
+                    "repo": repo_full,
+                    "skill_path": skill_path,
+                    "skill_dir": skill_dirs[skill_path],
+                    "skill_name": (
+                        Path(skill_dirs[skill_path]).name
+                        if skill_dirs[skill_path]
+                        else Path(skill_path).stem
+                    ),
+                    "head_sha": head_sha_short,
+                    "bundled_files": bundled,
+                    "bundled_count": len(bundled),
+                    "bundled_text_count": sum(
+                        1 for b in bundled if not b["binary_or_oversize"]
+                    ),
+                }
+                fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n_skills += 1
+                n_text_files += rec["bundled_text_count"]
 
-            return {
-                "repo": repo_full,
-                "status": "ok",
-                "skills": n_skills,
-                "text_files": n_files,
-                "elapsed_s": round(time.time() - started, 2),
-            }
+        return {
+            "repo": repo_full,
+            "status": "ok",
+            "skills": n_skills,
+            "text_files": n_text_files,
+            "elapsed_s": round(time.time() - started, 2),
+        }
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        if out.exists():
+            out.unlink()
+        return {
+            "repo": repo_full,
+            "status": "error",
+            "error": f"{type(e).__name__}: {e}",
+            "elapsed_s": round(time.time() - started, 2),
+        }
     except Exception as e:
         if out.exists():
             out.unlink()
