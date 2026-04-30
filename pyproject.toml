@@ -1,0 +1,14 @@
+[project]
+name = "skill-diffs"
+version = "0.1.0"
+description = "Dataset of agent skill (SKILL.md) commit histories and diff pairs."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.2",
+    "huggingface-hub>=1.12.2",
+    "pyarrow>=24.0.0",
+]
+
+[dependency-groups]
+dev = []
