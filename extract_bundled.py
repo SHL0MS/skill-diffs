@@ -27,9 +27,13 @@ from extract import clone_partial, parse_repo_slug, run_git
 
 
 DATA_DIR = Path("data")
-RAW_DIR = DATA_DIR / "raw"
+RAW_DIR = DATA_DIR / "raw"  # legacy; only used as fallback
+RELEASE_DIR = DATA_DIR / "release"
 BUNDLED_DIR = DATA_DIR / "bundled"
 BUNDLED_MANIFEST = DATA_DIR / "bundled_manifest.jsonl"
+
+# Cache for skill paths grouped by repo (loaded once from parquet)
+_SKILL_PATHS_BY_REPO = None
 
 MAX_FILE_BYTES = 1_000_000  # 1 MB per file cap
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
@@ -40,20 +44,36 @@ def output_path(repo_full):
     return BUNDLED_DIR / f"{safe}.jsonl"
 
 
+def _load_skill_paths_by_repo():
+    """Load (repo -> sorted list of skill_paths) once, from parquet if available."""
+    global _SKILL_PATHS_BY_REPO
+    if _SKILL_PATHS_BY_REPO is not None:
+        return _SKILL_PATHS_BY_REPO
+
+    diffs_parquet = RELEASE_DIR / "diffs.parquet"
+    by_repo = {}
+    if diffs_parquet.exists():
+        import pyarrow.parquet as pq
+        t = pq.read_table(diffs_parquet, columns=["repo", "skill_path"])
+        for r, p in zip(t["repo"].to_pylist(), t["skill_path"].to_pylist()):
+            by_repo.setdefault(r, set()).add(p)
+    elif RAW_DIR.exists():
+        # Legacy fallback: read from per-repo JSONL
+        for f in RAW_DIR.glob("*.jsonl"):
+            with open(f) as fp:
+                for line in fp:
+                    try:
+                        rec = json.loads(line)
+                        by_repo.setdefault(rec["repo"], set()).add(rec["skill_path"])
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+    _SKILL_PATHS_BY_REPO = {k: sorted(v) for k, v in by_repo.items()}
+    return _SKILL_PATHS_BY_REPO
+
+
 def list_skill_paths_for_repo(repo_full):
-    """Read skill paths from the existing diff JSONL for this repo."""
-    diff_file = RAW_DIR / f"{repo_full.replace('/', '__')}.jsonl"
-    if not diff_file.exists():
-        return []
-    skills = set()
-    with open(diff_file) as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-                skills.add(rec["skill_path"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-    return sorted(skills)
+    """Return sorted list of skill_paths for the repo, from the global cache."""
+    return _load_skill_paths_by_repo().get(repo_full, [])
 
 
 def get_head_sha(repo_dir):
@@ -117,11 +137,12 @@ def get_blob_text(repo_dir, sha, path):
     return (text, size)
 
 
-def extract_bundled_for_repo(repo_full):
+def extract_bundled_for_repo(repo_full, skill_paths=None):
     """Clone repo, extract bundled resources for every skill_path we know."""
     started = time.time()
     out = output_path(repo_full)
-    skill_paths = list_skill_paths_for_repo(repo_full)
+    if skill_paths is None:
+        skill_paths = list_skill_paths_for_repo(repo_full)
     if not skill_paths:
         return {
             "repo": repo_full,
@@ -232,12 +253,11 @@ def main():
 
     BUNDLED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Discover repos that have diff data
-    diff_repos = set()
-    for f in RAW_DIR.glob("*.jsonl"):
-        # filename is "<owner>__<repo>.jsonl" (single underscore)
-        repo_full = f.stem.replace("__", "/", 1)
-        diff_repos.add(repo_full)
+    # Load skill_paths grouped by repo (from parquet — single load, memory-efficient)
+    print("Loading repo→skills index from data/release/diffs.parquet...", file=sys.stderr)
+    skill_paths_by_repo = _load_skill_paths_by_repo()
+    diff_repos = set(skill_paths_by_repo.keys())
+    print(f"  Found {len(diff_repos):,} repos with at least one skill", file=sys.stderr)
 
     bundled_index = load_manifest_index(BUNDLED_MANIFEST)
 
@@ -267,7 +287,10 @@ def main():
     n_ok = n_err = n_skip = 0
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(extract_bundled_for_repo, r): r for r in pending}
+        futures = {
+            pool.submit(extract_bundled_for_repo, r, skill_paths_by_repo[r]): r
+            for r in pending
+        }
         for i, future in enumerate(as_completed(futures), 1):
             entry = future.result()
             append_manifest(entry, BUNDLED_MANIFEST)
