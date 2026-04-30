@@ -26,11 +26,14 @@ def get_token(args):
     if args.token:
         return args.token
     if args.token_from_keychain:
+        # Format: "account/service" (per keychain-secrets convention)
+        if "/" in args.token_from_keychain:
+            account, service = args.token_from_keychain.split("/", 1)
+            cmd = ["security", "find-generic-password", "-a", account, "-s", service, "-w"]
+        else:
+            cmd = ["security", "find-generic-password", "-s", args.token_from_keychain, "-w"]
         try:
-            result = subprocess.run(
-                ["security", "find-generic-password", "-s", args.token_from_keychain, "-w"],
-                capture_output=True, text=True, check=True,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             return result.stdout.strip()
         except subprocess.CalledProcessError:
             print(f"ERROR: keychain entry '{args.token_from_keychain}' not found", file=sys.stderr)

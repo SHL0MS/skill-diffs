@@ -5,6 +5,7 @@ description = "Dataset of agent skill (SKILL.md) commit histories and diff pairs
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "anthropic>=0.97.0",
     "duckdb>=1.5.2",
     "huggingface-hub>=1.12.2",
     "pyarrow>=24.0.0",

@@ -4,7 +4,14 @@ Pipeline that scrapes commit histories of agent skills (`SKILL.md` files) from p
 
 ## What's in the dataset
 
+Published at **[`shl0ms/skill-diffs`](https://huggingface.co/datasets/shl0ms/skill-diffs)** on HuggingFace.
+
 A snapshot built April 2026 covers **2,774 repos / 91,355 clean diff pairs / 662,885 total records** — roughly 60x larger than the existing public diff corpus (`huzey/claude-skills-diff`). See `data/release/README.md` for the full data card.
+
+```python
+from datasets import load_dataset
+ds = load_dataset("shl0ms/skill-diffs", "diffs_clean", split="train")
+```
 
 ## Why
 
