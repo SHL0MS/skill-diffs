@@ -19,3 +19,7 @@ work/
 .DS_Store
 .idea/
 .vscode/
+
+# Stray run logs
+upload.log
+*.tmp.parquet
