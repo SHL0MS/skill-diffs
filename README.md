@@ -8,19 +8,27 @@ Published at **[`shl0ms/skill-diffs`](https://huggingface.co/datasets/shl0ms/ski
 
 A snapshot built April 2026 covers:
 
-- **2,774 source repos**
-- **420,636 unique skills** (across all repos, including fork copies)
-- **91,355 clean diff pairs** (~60x larger than the existing public diff corpus `huzey/claude-skills-diff`)
+- **2,774 source repos** with SPDX license metadata (1,579 have a recognized license)
+- **420,636 unique skills** total / **127,034 unique clusters** after MinHash near-duplicate dedup (78% of skills are part of fork-clusters)
+- **91,355 clean diff pairs** (default tier, ~60x larger than `huzey/claude-skills-diff`)
+- **55,087 strict-clean diff pairs** (canonical-only, frontmatter-validated, same-author-deduped — ~37x larger and the recommended tier for serious training)
 - **662,885 total records** (every commit-by-commit revision)
-- **415,506 bundled-resource snapshots** with **984,313 sibling files** (templates, scripts, references) captured
+- **415,506 bundled-resource snapshots** with **984,313 sibling files** captured
 
 See `data/release/README.md` for the full data card.
 
 ```python
 from datasets import load_dataset
 
-# Just the gold tier — DPO-ready (before, after, intent) pairs
+# Default clean tier
 diffs = load_dataset("shl0ms/skill-diffs", "diffs_clean", split="train")
+
+# Strict-clean: filter to canonical, valid-frontmatter, no same-author-dup
+strict = diffs.filter(
+    lambda r: r["is_canonical"]
+    and "invalid_frontmatter" not in r["quality_tags"]
+    and "same_author_dup" not in r["quality_tags"]
+)
 
 # Skill folder context (bundled files), joinable on skill_id
 bundled = load_dataset("shl0ms/skill-diffs", "bundled", split="train")
@@ -78,5 +86,7 @@ Each phase is resumable (manifest-based for `batch.py`).
 
 ## Status
 
-- **v0.2 (current)** — diff dataset with full LLM-augmented intent classification and bundled resource capture
-- **v0.3 (planned)** — PR description metadata; broader corpus (non-`SKILL.md` formats like Cursor rules and OpenCode skills); deduplication helpers for fork-aware training splits
+- **v0.3 (current)** — adds MinHash skill clustering, frontmatter validation, same-author dedup, and SPDX license metadata
+- **v0.2** — bundled resources (skill folder sibling files) captured via tarball API
+- **v0.1** — diff dataset with full LLM-augmented intent classification
+- **v0.4 (planned)** — PR description metadata; broader corpus (non-`SKILL.md` formats like Cursor rules and OpenCode skills); embedding-based semantic clustering
