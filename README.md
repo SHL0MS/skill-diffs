@@ -6,11 +6,24 @@ Pipeline that scrapes commit histories of agent skills (`SKILL.md` files) from p
 
 Published at **[`shl0ms/skill-diffs`](https://huggingface.co/datasets/shl0ms/skill-diffs)** on HuggingFace.
 
-A snapshot built April 2026 covers **2,774 repos / 91,355 clean diff pairs / 662,885 total records** — roughly 60x larger than the existing public diff corpus (`huzey/claude-skills-diff`). See `data/release/README.md` for the full data card.
+A snapshot built April 2026 covers:
+
+- **2,774 source repos**
+- **420,636 unique skills** (across all repos, including fork copies)
+- **91,355 clean diff pairs** (~60x larger than the existing public diff corpus `huzey/claude-skills-diff`)
+- **662,885 total records** (every commit-by-commit revision)
+- **415,506 bundled-resource snapshots** with **984,313 sibling files** (templates, scripts, references) captured
+
+See `data/release/README.md` for the full data card.
 
 ```python
 from datasets import load_dataset
-ds = load_dataset("shl0ms/skill-diffs", "diffs_clean", split="train")
+
+# Just the gold tier — DPO-ready (before, after, intent) pairs
+diffs = load_dataset("shl0ms/skill-diffs", "diffs_clean", split="train")
+
+# Skill folder context (bundled files), joinable on skill_id
+bundled = load_dataset("shl0ms/skill-diffs", "bundled", split="train")
 ```
 
 ## Why
@@ -65,6 +78,5 @@ Each phase is resumable (manifest-based for `batch.py`).
 
 ## Status
 
-- **v0.1 (current)** — diff dataset with regex intent classification and heuristic filtering
-- **v0.2 (planned)** — LLM classification of `unknown` intent records (~$5-10 budget); bundled resources capture; PR description metadata
-- **v0.3** — broader corpus (Sourcegraph for current GitHub coverage; non-`SKILL.md` formats like Cursor rules and OpenCode skills)
+- **v0.2 (current)** — diff dataset with full LLM-augmented intent classification and bundled resource capture
+- **v0.3 (planned)** — PR description metadata; broader corpus (non-`SKILL.md` formats like Cursor rules and OpenCode skills); deduplication helpers for fork-aware training splits
