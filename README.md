@@ -15,7 +15,7 @@ The May 2026 snapshot covers **3 platforms** (Anthropic Claude, OpenCode, Hermes
 - **864,877 total records** (every commit-by-commit revision across all platforms)
 - **112,482 clean diff pairs** (default tier — ~75x larger than `huzey/claude-skills-diff`)
 - **66,171 records in `curator_training.parquet`** — the recommended training subset for skill-edit / curator models (strict-clean + canonical + non-trivial PR/commit intent + license-known)
-- **53,340 records with PR title + body** as intent labels (richer than commit subjects alone)
+- **64,272 records with PR title + body** as intent labels (7.4% full / 18.5% of the clean tier — richer than commit subjects alone)
 - **415,506 bundled-resource snapshots** (v0.3 only — does not yet cover OpenCode/Hermes)
 
 See `data/release/README.md` for the full data card.
@@ -63,7 +63,7 @@ discover.py               →  data/expansion_repos.txt
 discover_v04.py           →  data/{opencode,hermes,openclaw}_repos.txt
 batch.py                  →  data/raw/<repo>.jsonl                  (Anthropic corpus)
 batch_v04.py              →  data/raw_<platform>_skill/<repo>.jsonl (new platforms)
-consolidate.py            →  data/release/{diffs,diffs_clean,skills_initial,repos}.parquet
+consolidate_v04.py        →  data/release/{diffs,diffs_clean,skills_initial,repos}.parquet
 pr_metadata.py            →  data/pr_cache/<repo>.json              (cached PR fetch)
 join_pr_metadata.py       →  adds pr_* columns to release parquets
 add_licenses.py           →  adds license/stars to repos.parquet
@@ -150,4 +150,4 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 - **v0.3** — MinHash skill clustering, frontmatter validation, same-author dedup, SPDX license metadata
 - **v0.2** — bundled resources (skill folder sibling files) captured via tarball API
 - **v0.1** — diff dataset with full LLM-augmented intent classification
-- **v0.5 (planned)** — OpenClaw + Cursor corpus expansion (discovery completed, extraction deferred); embedding-based semantic clustering; bundled.parquet refresh for new platforms; PR-commit-list deep matching (currently only catches squash + head SHAs, ~10-20% record coverage)
+- **v0.5 (planned)** — OpenClaw + Cursor corpus expansion (discovery completed, extraction deferred); embedding-based semantic clustering; bundled.parquet refresh for new platforms; PR-commit-list deep matching (currently only catches squash + head SHAs, achieving 7.4% full / 18.5% clean-tier coverage)
