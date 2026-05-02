@@ -2,6 +2,8 @@
 
 Pipeline that scrapes commit histories of agent skills (`SKILL.md` files) from public GitHub repos and packages them as a dataset of (before, after, intent) diff pairs for training and evaluation.
 
+> **Just want to fine-tune a curator/skill-edit model?** Read [TRAINING.md](TRAINING.md). You don't need this pipeline — just `load_dataset("shl0ms/skill-diffs", "curator_training")`.
+
 ## What's in the dataset
 
 Published at **[`shl0ms/skill-diffs`](https://huggingface.co/datasets/shl0ms/skill-diffs)** on HuggingFace.
@@ -95,28 +97,52 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 
 ## Files
 
+### v0.4 current (use these)
+
 | File | Purpose |
 |---|---|
-| `extract.py` | Single-repo SKILL.md commit-history extractor |
-| `extract_cursor.py` | Per-repo extractor for `.cursorrules` / `.cursor/rules/*.mdc` (deferred to v0.5) |
-| `batch.py` | Parallel extraction across a repo list with per-repo manifest |
+| `extract.py` | Single-repo SKILL.md commit-history extractor (used by both batch scripts) |
 | `batch_v04.py` | Generalized batch runner — accepts `--platform` / `--extractor` for multi-format scraping |
 | `discover.py` | Find Claude/Anthropic skill repos via GitHub repo + code search |
 | `discover_v04.py` | Discovery for OpenCode / Hermes Agent / OpenClaw repos |
-| `discover_cursor.py` | Discovery for Cursor rules repos (deferred to v0.5) |
-| `classify.py` | Regex intent classifier for commit messages |
-| `filter_quality.py` | Tag records with quality flags; produce clean subset |
-| `consolidate.py` | Streaming JSONL → parquet with classify + filter applied inline |
 | `consolidate_v04.py` | Multi-platform consolidate emitting per-format parquets with `platform` column |
 | `pr_metadata.py` | Per-repo PR list fetch + cache; matches `head_sha` and `merge_commit_sha` |
 | `join_pr_metadata.py` | Add PR columns to release parquets |
 | `add_licenses.py` | SPDX license + stars + pushed_at metadata via gh API |
-| `enrich_v03.py` | MinHash near-duplicate clustering + frontmatter validation + same-author dedup |
-| `extract_bundled.py` | (v0.2) Capture sibling files (scripts/, references/) from skill folders |
-| `merge_v04.py` | Recovery script: combine v0.3 release parquets + new platform data |
+| `enrich_v03.py` | MinHash near-duplicate clustering + frontmatter validation + same-author dedup (kept name from when it was new in v0.3) |
+| `extract_bundled.py` | Capture sibling files (scripts/, references/) from skill folders (v0.3 only — needs v0.5 refresh) |
 | `curator_subset.py` | Derive `curator_training.parquet` from the full corpus |
 | `skill_linter.py` | Rule-based linter for SKILL.md (13 rules; CLI tool + report mode) |
 | `eval_curator.py` | Held-out skill-patch eval harness; identity / intent_only / API-model adapters |
+| `finish_v04.sh` | Orchestrates the full enrichment chain after batch jobs finish |
+| `monitor.sh` | Live progress monitor for long-running pipeline runs |
+| `upload_hf.py` | Push release parquets to HuggingFace |
+
+### Legacy / superseded (kept for reproducing earlier versions)
+
+| File | Notes |
+|---|---|
+| `batch.py` | v0.3-era batch runner; superseded by `batch_v04.py` (which has a `--platform` arg + per-platform manifests) |
+| `consolidate.py` | v0.3-era consolidate; superseded by `consolidate_v04.py` |
+| `classify.py`, `filter_quality.py` | Imported by both `consolidate.py` and `consolidate_v04.py` — still used |
+| `llm_classify.py` | Stand-alone Claude Haiku 4.5 batch classifier; only run once, results in `data/llm_classifications.json` |
+| `aggregate_bundled.py`, `analyze.py`, `build_dataset.py` | Earlier exploratory scripts; not on the v0.4 path |
+| `fetch_huzey_repos.py` | One-off seed list fetch from `huzey/claude-skills` |
+
+### Deferred to v0.5 (written but not run)
+
+| File | Notes |
+|---|---|
+| `extract_cursor.py` | Cursor rules extractor (`.cursorrules`, `.cursor/rules/*.mdc`) |
+| `discover_cursor.py` | Cursor rules discovery |
+| `embed_cluster.py` | Embedding-based semantic clustering (BAAI/bge-small-en-v1.5) |
+| `add_semantic_clusters.py` | Merge semantic clusters into release parquets |
+
+### One-off recovery
+
+| File | Notes |
+|---|---|
+| `merge_v04.py` | Recovery script used once to reconstruct v0.4 from `data/v03_backup/` (downloaded from HF) + new platform data after `data/raw/` was missing. Don't run unless reproducing the same recovery. |
 
 ## Status
 
