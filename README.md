@@ -14,7 +14,8 @@ The May 2026 snapshot covers **4 platforms** (Anthropic Claude, OpenClaw, OpenCo
 - **664,872 unique skills** total — MinHash-clustered for near-duplicate dedup
 - **986,515 total records** (every commit-by-commit revision across all platforms)
 - **130,631 clean diff pairs** (default tier — ~85x larger than `huzey/claude-skills-diff`)
-- **75,310 records in `curator_training.parquet`** — the recommended training subset for skill-edit / curator models (strict-clean + canonical + non-trivial PR/commit intent + license-known)
+- **75,310 records in `curator_training.parquet`** — recommended default training subset for skill-edit / curator models (strict-clean + canonical + non-trivial intent)
+- **38,010 records in `curator_training_strict.parquet`** — stricter tier that also requires SPDX license + no PII + no placeholder content + engaged-repo signal. Use this if you plan to publish a model trained on the data.
 - **76,142 records with PR title + body** as intent labels (7.7% full / 18.8% of the clean tier — richer than commit subjects alone)
 - **415,506 bundled-resource snapshots** (Anthropic platform only — needs v0.5 refresh for new platforms)
 
@@ -31,6 +32,9 @@ hermes = diffs.filter(lambda r: r["platform"] == "hermes_skill")
 
 # The curator-recommended training subset (pre-filtered)
 curator = load_dataset("shl0ms/skill-diffs", "curator_training", split="train")
+
+# Stricter variant — license-known, PII-filtered, no placeholders, engaged repos
+strict = load_dataset("shl0ms/skill-diffs", "curator_training_strict", split="train")
 
 # Bundled skill-folder context (sibling files)
 bundled = load_dataset("shl0ms/skill-diffs", "bundled", split="train")
@@ -114,7 +118,8 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 | `add_licenses.py` | SPDX license + stars + pushed_at metadata via gh API |
 | `enrich_v03.py` | MinHash near-duplicate clustering + frontmatter validation + same-author dedup (kept name from when it was new in v0.3) |
 | `extract_bundled.py` | Capture sibling files (scripts/, references/) from skill folders (v0.3 only — needs v0.5 refresh) |
-| `curator_subset.py` | Derive `curator_training.parquet` from the full corpus |
+| `curator_subset.py` | Derive `curator_training.parquet` from the full corpus (default + `--strict` mode for the strict variant) |
+| `add_quality_v041.py` | Apply 4 v0.4.2 quality tags (no_license, low_engagement, placeholder_content, pii_email) to release parquets. Idempotent. |
 | `skill_linter.py` | Rule-based linter for SKILL.md (13 rules; CLI tool + report mode) |
 | `eval_curator.py` | Held-out skill-patch eval harness; identity / intent_only / API-model adapters |
 | `finish_v04.sh` | Orchestrates the full enrichment chain after batch jobs finish |
@@ -150,7 +155,8 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 
 ## Status
 
-- **v0.4.1 (current)** — adds OpenClaw platform (1,631 repos, +18k clean diff pairs). Per-repo timeout in `extract.py` to prevent monorepo straggler hangs.
+- **v0.4.2 (current)** — 4 new `quality_tags` (`no_license`, `low_engagement`, `placeholder_content`, `pii_email`); `curator_training_strict.parquet` (38k records) for redistribution-safe / publishable training
+- **v0.4.1** — adds OpenClaw platform (1,631 repos, +18k clean diff pairs); per-repo timeout in `extract.py` to prevent monorepo straggler hangs
 - **v0.4** — PR title+body metadata; multi-platform expansion (Anthropic + Hermes Agent + OpenCode); `curator_training.parquet` + skill linter + eval scaffold
 - **v0.3** — MinHash skill clustering, frontmatter validation, same-author dedup, SPDX license metadata
 - **v0.2** — bundled resources (skill folder sibling files) captured via tarball API

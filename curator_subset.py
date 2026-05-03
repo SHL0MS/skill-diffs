@@ -46,11 +46,19 @@ CURATOR_INTENT_CLASSES = {
     # be inclusive about classifier output — better recall for v0.4
 }
 
-# Disqualifying quality tags
+# Disqualifying quality tags for the default (non-strict) curator subset
 DISQUALIFYING_TAGS = {
     "bot_author", "whitespace_change", "merge_commit", "revert_subject",
     "pre_revert", "duplicate_pair", "micro_edit", "short_skill",
     "invalid_frontmatter", "same_author_dup",
+}
+
+# Additional tags excluded by --strict (added in v0.4.2)
+STRICT_DISQUALIFYING_TAGS = {
+    "no_license",          # repo lacks SPDX license — redistribution risk
+    "low_engagement",      # 0 stars + no license + no recent push
+    "placeholder_content", # <your X here>, TODO: fill, lorem ipsum, etc
+    "pii_email",           # contains real-looking email addresses (not allowlist)
 }
 
 
@@ -60,7 +68,15 @@ def main():
     parser.add_argument("--out", default=None)
     parser.add_argument("--include-non-canonical", action="store_true",
                         help="Include non-canonical skills (default: drop)")
+    parser.add_argument("--strict", action="store_true",
+                        help="Apply stricter quality filters: no_license, "
+                             "low_engagement, placeholder_content, pii_email. "
+                             "Default output path becomes curator_training_strict.parquet")
     args = parser.parse_args()
+
+    disq = set(DISQUALIFYING_TAGS)
+    if args.strict:
+        disq |= STRICT_DISQUALIFYING_TAGS
 
     rdir = Path(args.release_dir)
     diffs_path = rdir / "diffs.parquet"
@@ -90,11 +106,13 @@ def main():
     # Filter: no disqualifying quality tags
     quality_tags = t["quality_tags"].to_pylist()
     keep = [
-        not (set(tags or []) & DISQUALIFYING_TAGS)
+        not (set(tags or []) & disq)
         for tags in quality_tags
     ]
     t = t.filter(pa.array(keep))
-    print(f"  -> {t.num_rows:,} after disqualifying-tag filter", file=sys.stderr)
+    label = "strict-disqualifying" if args.strict else "disqualifying"
+    print(f"  -> {t.num_rows:,} after {label}-tag filter "
+          f"({len(disq)} tags)", file=sys.stderr)
 
     # Filter: substantive intent_class
     intent_classes = t["intent_class"].to_pylist()
@@ -179,7 +197,12 @@ def main():
     out_cols = [c for c in out_cols if c in t.schema.names]
     out = t.select(out_cols)
 
-    out_path = Path(args.out) if args.out else (rdir / "curator_training.parquet")
+    if args.out:
+        out_path = Path(args.out)
+    elif args.strict:
+        out_path = rdir / "curator_training_strict.parquet"
+    else:
+        out_path = rdir / "curator_training.parquet"
     pq.write_table(out, out_path, compression="zstd")
 
     size_mb = out_path.stat().st_size / 1e6

@@ -64,6 +64,7 @@ A model trained specifically on `(before, intent, after)` triples should produce
 | Source | Records | Notes |
 |---|---|---|
 | `curator_training` config | 75,310 | Strict-clean + canonical + non-trivial intent. **Default training set.** |
+| `curator_training_strict` config | 38,010 | Same plus SPDX license + no PII + no placeholders + engaged-repo. **Use this if you plan to publish a trained model** (license-clean for redistribution) |
 | `curator_eval_set` config | 200 | Held-out (seed=42), already filtered for quality. **Don't train on this.** |
 | `diffs_clean` config | 130,631 | Looser tier — includes records the curator subset filtered out. Use for ablations |
 
@@ -73,7 +74,9 @@ For DPO instead of SFT: the same `(before, after)` pairs work as `(rejected, cho
 
 ### Filtering for higher quality (optional)
 
-The default 66k subset is permissive. Tighter filters worth considering:
+**Quick recommendation:** if you plan to publish a model trained on this data, start with `curator_training_strict` (38k records, license-clean) instead of `curator_training`.
+
+The default 75k subset is permissive. Tighter filters worth considering:
 
 ```python
 # Only records with PR title (richer intent labels)
