@@ -14,14 +14,21 @@ Usage:
 """
 import argparse
 import json
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 
 GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+DEFAULT_REPO_TIMEOUT_S = 1800  # mirrors extract.py
+
+
+class RepoTimeoutError(Exception):
+    pass
 
 
 def is_cursor_rule_path(path):
@@ -145,7 +152,8 @@ def rule_name_for_path(path):
     return p.stem
 
 
-def extract_repo(url, output_path, quiet=False):
+def extract_repo(url, output_path, quiet=False, timeout=DEFAULT_REPO_TIMEOUT_S):
+    """Same shape as extract.extract_repo; per-repo timeout via SIGALRM."""
     def log(msg):
         if not quiet:
             print(msg, file=sys.stderr)
@@ -153,55 +161,81 @@ def extract_repo(url, output_path, quiet=False):
     owner, repo = parse_repo_slug(url)
     repo_full = f"{owner}/{repo}"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        repo_dir = Path(tmp) / "repo"
-        log(f"Cloning {url} (partial)...")
-        clone_partial(url, repo_dir)
+    started = time.time()
 
-        rule_files = find_rule_files_in_head(repo_dir)
-        log(f"Found {len(rule_files)} cursor-rule file(s) in HEAD")
+    def _alarm_handler(signum, frame):
+        raise RepoTimeoutError(f"Repo {repo_full} exceeded {timeout}s timeout")
 
-        records = 0
-        with open(output_path, "w") as out:
-            for rule_path in rule_files:
-                history = get_file_history(repo_dir, rule_path)
-                log(f"  {rule_path}: {len(history)} commit(s)")
+    prev_handler = None
+    if timeout:
+        prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(int(timeout))
 
-                prev_sha = None
-                prev_content = None
-                for commit in history:
-                    sha = commit["sha"]
-                    content = get_blob_at_commit(repo_dir, sha, rule_path)
-                    if content is None:
-                        continue
-                    added, removed = diff_numstat(repo_dir, prev_sha, sha, rule_path)
-                    char_delta = len(content) - (len(prev_content) if prev_content else 0)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            log(f"Cloning {url} (partial)...")
+            clone_partial(url, repo_dir)
 
-                    record = {
-                        "repo": repo_full,
-                        "format": "cursor_rule",
-                        "skill_path": rule_path,         # named skill_* for schema parity
-                        "skill_name": rule_name_for_path(rule_path),
-                        "before_sha": prev_sha,
-                        "after_sha": sha,
-                        "before_content": prev_content,
-                        "after_content": content,
-                        "commit_subject": commit["subject"],
-                        "commit_author": commit["author"],
-                        "commit_email": commit["email"],
-                        "commit_date": commit["date"],
-                        "lines_added": added,
-                        "lines_removed": removed,
-                        "char_delta": char_delta,
-                        "is_initial": prev_sha is None,
-                    }
-                    out.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    records += 1
-                    prev_sha = sha
-                    prev_content = content
+            rule_files = find_rule_files_in_head(repo_dir)
+            log(f"Found {len(rule_files)} cursor-rule file(s) in HEAD")
 
-        log(f"\nWrote {records} record(s) to {output_path}")
-        return records
+            records = 0
+            with open(output_path, "w") as out:
+                for rule_path in rule_files:
+                    if timeout and (time.time() - started) > timeout:
+                        raise RepoTimeoutError(
+                            f"Repo {repo_full} timeout before processing {rule_path}"
+                        )
+                    history = get_file_history(repo_dir, rule_path)
+                    log(f"  {rule_path}: {len(history)} commit(s)")
+
+                    prev_sha = None
+                    prev_content = None
+                    for commit in history:
+                        sha = commit["sha"]
+                        content = get_blob_at_commit(repo_dir, sha, rule_path)
+                        if content is None:
+                            continue
+                        added, removed = diff_numstat(repo_dir, prev_sha, sha, rule_path)
+                        char_delta = len(content) - (len(prev_content) if prev_content else 0)
+
+                        record = {
+                            "repo": repo_full,
+                            "format": "cursor_rule",
+                            "skill_path": rule_path,
+                            "skill_name": rule_name_for_path(rule_path),
+                            "before_sha": prev_sha,
+                            "after_sha": sha,
+                            "before_content": prev_content,
+                            "after_content": content,
+                            "commit_subject": commit["subject"],
+                            "commit_author": commit["author"],
+                            "commit_email": commit["email"],
+                            "commit_date": commit["date"],
+                            "lines_added": added,
+                            "lines_removed": removed,
+                            "char_delta": char_delta,
+                            "is_initial": prev_sha is None,
+                        }
+                        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        records += 1
+                        prev_sha = sha
+                        prev_content = content
+
+            log(f"\nWrote {records} record(s) to {output_path}")
+            return records
+    except RepoTimeoutError:
+        try:
+            Path(output_path).unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        if timeout:
+            signal.alarm(0)
+            if prev_handler is not None:
+                signal.signal(signal.SIGALRM, prev_handler)
 
 
 def main():

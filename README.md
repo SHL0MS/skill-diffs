@@ -8,15 +8,15 @@ Pipeline that scrapes commit histories of agent skills (`SKILL.md` files) from p
 
 Published at **[`shl0ms/skill-diffs`](https://huggingface.co/datasets/shl0ms/skill-diffs)** on HuggingFace.
 
-The May 2026 snapshot covers **3 platforms** (Anthropic Claude, OpenCode, Hermes Agent):
+The May 2026 snapshot covers **4 platforms** (Anthropic Claude, OpenClaw, OpenCode, Hermes Agent):
 
-- **4,523 source repos** with SPDX license metadata
-- **577,794 unique skills** total / **MinHash-clustered** for near-duplicate dedup
-- **864,877 total records** (every commit-by-commit revision across all platforms)
-- **112,482 clean diff pairs** (default tier — ~75x larger than `huzey/claude-skills-diff`)
-- **66,171 records in `curator_training.parquet`** — the recommended training subset for skill-edit / curator models (strict-clean + canonical + non-trivial PR/commit intent + license-known)
-- **64,272 records with PR title + body** as intent labels (7.4% full / 18.5% of the clean tier — richer than commit subjects alone)
-- **415,506 bundled-resource snapshots** (v0.3 only — does not yet cover OpenCode/Hermes)
+- **5,891 source repos** with SPDX license metadata
+- **664,872 unique skills** total — MinHash-clustered for near-duplicate dedup
+- **986,515 total records** (every commit-by-commit revision across all platforms)
+- **130,631 clean diff pairs** (default tier — ~85x larger than `huzey/claude-skills-diff`)
+- **75,310 records in `curator_training.parquet`** — the recommended training subset for skill-edit / curator models (strict-clean + canonical + non-trivial PR/commit intent + license-known)
+- **76,142 records with PR title + body** as intent labels (7.7% full / 18.8% of the clean tier — richer than commit subjects alone)
+- **415,506 bundled-resource snapshots** (Anthropic platform only — needs v0.5 refresh for new platforms)
 
 See `data/release/README.md` for the full data card.
 
@@ -26,7 +26,7 @@ from datasets import load_dataset
 # Default clean tier (all 3 platforms)
 diffs = load_dataset("shl0ms/skill-diffs", "diffs_clean", split="train")
 
-# Filter to one platform
+# Filter to one platform (claude_skill / opencode_skill / hermes_skill / openclaw_skill)
 hermes = diffs.filter(lambda r: r["platform"] == "hermes_skill")
 
 # The curator-recommended training subset (pre-filtered)
@@ -46,13 +46,13 @@ Use cases:
 - **DPO / preference-pair training** — `(before, after)` where `after` is the human-corrected version
 - **Pattern mining** — what kinds of edits are most common in skill iteration (frontmatter fixes, model name updates, code-block language tags)
 - **Initial-state generation** — `skills_initial.parquet` for "create a skill from scratch" training
-- **Cross-platform analysis** — `platform` column lets you compare conventions between Anthropic, Hermes Agent, and OpenCode skill formats
+- **Cross-platform analysis** — `platform` column lets you compare conventions between Anthropic, OpenClaw, OpenCode, and Hermes Agent skill formats
 
 ## Companion tools
 
 Two complementary scripts ship alongside the dataset:
 
-- **`skill_linter.py`** — rule-based linter (no LLM, no clone, no network) covering 13 patterns derived from observed defects: missing or incomplete frontmatter, missing code-block languages, deprecated model references (e.g. `gpt-3.5-turbo`, `claude-2.x`), legacy API calls (`openai.ChatCompletion`), weak/long descriptions. Validated against 577k skills (61% have at least one finding).
+- **`skill_linter.py`** — rule-based linter (no LLM, no clone, no network) covering 13 patterns derived from observed defects: missing or incomplete frontmatter, missing code-block languages, deprecated model references (e.g. `gpt-3.5-turbo`, `claude-2.x`), legacy API calls (`openai.ChatCompletion`), weak/long descriptions. Validated against 665k skills (61% have at least one finding).
 - **`eval_curator.py`** — held-out eval scaffold for benchmarking models on the skill-patch task: given `(before, intent_text)`, produce the patched skill. Built-in baselines (`identity`, `intent_only`) plus adapters for OpenAI, Anthropic, OpenRouter. Metrics: exact_match, edit_distance_ratio, ROUGE-L, BAAI/bge-small-en-v1.5 cosine similarity.
 
 ## Pipeline
@@ -61,13 +61,14 @@ Two complementary scripts ship alongside the dataset:
 fetch_huzey_repos.py      →  data/huzey_repos.txt
 discover.py               →  data/expansion_repos.txt
 discover_v04.py           →  data/{opencode,hermes,openclaw}_repos.txt
-batch.py                  →  data/raw/<repo>.jsonl                  (Anthropic corpus)
-batch_v04.py              →  data/raw_<platform>_skill/<repo>.jsonl (new platforms)
+batch.py                  →  data/raw/<repo>.jsonl                  (Anthropic corpus, legacy)
+batch_v04.py              →  data/raw_<platform>_skill/<repo>.jsonl (new platforms, with --timeout)
 consolidate_v04.py        →  data/release/{diffs,diffs_clean,skills_initial,repos}.parquet
+add_platform.py           →  incrementally append a new platform's raw JSONL into existing release
 pr_metadata.py            →  data/pr_cache/<repo>.json              (cached PR fetch)
 join_pr_metadata.py       →  adds pr_* columns to release parquets
-add_licenses.py           →  adds license/stars to repos.parquet
-enrich_v03.py             →  MinHash clustering + frontmatter validation
+add_licenses.py           →  adds license/stars to repos.parquet (idempotent)
+enrich_v03.py             →  MinHash clustering + frontmatter validation (idempotent)
 curator_subset.py         →  data/release/curator_training.parquet
 skill_linter.py           →  rule-based defect detector (also a CLI tool)
 eval_curator.py           →  held-out benchmark for skill-patch models
@@ -84,6 +85,7 @@ uv run python discover_v04.py             # new platforms (Hermes, OpenCode, Ope
 uv run python batch.py --workers 16       # ~5-6 hours wall time
 uv run python batch_v04.py --repos data/hermes_repos.txt   --platform hermes_skill   --extractor skill_md --workers 16
 uv run python batch_v04.py --repos data/opencode_repos.txt --platform opencode_skill --extractor skill_md --workers 16
+uv run python batch_v04.py --repos data/openclaw_repos.txt --platform openclaw_skill --extractor skill_md --workers 16
 uv run python consolidate_v04.py
 uv run python pr_metadata.py --workers 4
 uv run python join_pr_metadata.py
@@ -101,8 +103,9 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 
 | File | Purpose |
 |---|---|
-| `extract.py` | Single-repo SKILL.md commit-history extractor (used by both batch scripts) |
-| `batch_v04.py` | Generalized batch runner — accepts `--platform` / `--extractor` for multi-format scraping |
+| `extract.py` | Single-repo SKILL.md commit-history extractor with per-repo `timeout` (default 30 min) |
+| `batch_v04.py` | Generalized batch runner — accepts `--platform` / `--extractor` / `--timeout` for multi-format scraping |
+| `add_platform.py` | Incrementally append a new platform's raw JSONL into existing release parquets (used to add OpenClaw to v0.4 → v0.4.1) |
 | `discover.py` | Find Claude/Anthropic skill repos via GitHub repo + code search |
 | `discover_v04.py` | Discovery for OpenCode / Hermes Agent / OpenClaw repos |
 | `consolidate_v04.py` | Multi-platform consolidate emitting per-format parquets with `platform` column |
@@ -143,11 +146,13 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 | File | Notes |
 |---|---|
 | `merge_v04.py` | Recovery script used once to reconstruct v0.4 from `data/v03_backup/` (downloaded from HF) + new platform data after `data/raw/` was missing. Don't run unless reproducing the same recovery. |
+| `finish_openclaw.sh` | Orchestrator used once to integrate the OpenClaw scrape into v0.4.1. Pattern is reusable for future incremental platform additions. |
 
 ## Status
 
-- **v0.4 (current)** — PR title+body metadata; multi-platform expansion (+ Hermes Agent + OpenCode); `curator_training.parquet` + skill linter + eval scaffold
+- **v0.4.1 (current)** — adds OpenClaw platform (1,631 repos, +18k clean diff pairs). Per-repo timeout in `extract.py` to prevent monorepo straggler hangs.
+- **v0.4** — PR title+body metadata; multi-platform expansion (Anthropic + Hermes Agent + OpenCode); `curator_training.parquet` + skill linter + eval scaffold
 - **v0.3** — MinHash skill clustering, frontmatter validation, same-author dedup, SPDX license metadata
 - **v0.2** — bundled resources (skill folder sibling files) captured via tarball API
 - **v0.1** — diff dataset with full LLM-augmented intent classification
-- **v0.5 (planned)** — OpenClaw + Cursor corpus expansion (discovery completed, extraction deferred); embedding-based semantic clustering; bundled.parquet refresh for new platforms; PR-commit-list deep matching (currently only catches squash + head SHAs, achieving 7.4% full / 18.5% clean-tier coverage)
+- **v0.5 (planned)** — Cursor corpus expansion (discovery completed, extraction deferred); embedding-based semantic clustering; bundled.parquet refresh for new platforms; PR-commit-list deep matching (currently only catches squash + head SHAs, achieving 7.7% full / 18.8% clean-tier coverage)

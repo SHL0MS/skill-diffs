@@ -118,18 +118,23 @@ def main():
                 "fetch_status": "not_attempted",
             })
 
-    new_schema = pa.schema(
-        list(t.schema)
-        + [
-            pa.field("license_spdx", pa.string()),
-            pa.field("license_name", pa.string()),
-            pa.field("stars", pa.int32()),
-            pa.field("default_branch", pa.string()),
-            pa.field("pushed_at", pa.string()),
-            pa.field("fetched_at", pa.string()),
-            pa.field("fetch_status", pa.string()),
-        ]
-    )
+    # Idempotent: if license columns already exist (from a prior run), drop
+    # them from the input schema so we don't end up with duplicate fields.
+    license_field_names = {
+        "license_spdx", "license_name", "stars", "default_branch",
+        "pushed_at", "fetched_at", "fetch_status",
+    }
+    new_fields = [f for f in t.schema if f.name not in license_field_names]
+    new_fields.extend([
+        pa.field("license_spdx", pa.string()),
+        pa.field("license_name", pa.string()),
+        pa.field("stars", pa.int32()),
+        pa.field("default_branch", pa.string()),
+        pa.field("pushed_at", pa.string()),
+        pa.field("fetched_at", pa.string()),
+        pa.field("fetch_status", pa.string()),
+    ])
+    new_schema = pa.schema(new_fields)
     out_tmp = REPOS_PATH.with_suffix(".tmp.parquet")
     pq.write_table(
         pa.Table.from_pylist(rows, schema=new_schema),

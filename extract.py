@@ -8,15 +8,22 @@ Output: JSONL, one record per (commit_pair, skill_file).
 """
 import argparse
 import json
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 
 SKILL_FILENAME_LOWER = "skill.md"
 GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+DEFAULT_REPO_TIMEOUT_S = 1800  # 30 min — covers all but absolute worst monorepos
+
+
+class RepoTimeoutError(Exception):
+    """Raised when extracting a repo exceeds its time budget."""
 
 
 def run_git(args, cwd, check=True):
@@ -134,8 +141,18 @@ def diff_numstat(repo_dir, before_sha, after_sha, path):
     return (0, 0)
 
 
-def extract_repo(url, output_path, quiet=False):
-    """Extract diff pairs from a repo, writing JSONL to output_path."""
+def extract_repo(url, output_path, quiet=False, timeout=DEFAULT_REPO_TIMEOUT_S):
+    """Extract diff pairs from a repo, writing JSONL to output_path.
+
+    timeout: max wall-clock seconds for this whole repo. After timeout
+    expires, raises RepoTimeoutError. Partial output is unlinked. Set to
+    None to disable.
+
+    Implementation: signal.SIGALRM in the worker subprocess. Works because
+    batch.py / batch_v04.py spawn each repo in its own ProcessPoolExecutor
+    worker, where signals are isolated. Does not work if extract_repo is
+    called from a non-main thread.
+    """
     def log(msg):
         if not quiet:
             print(msg, file=sys.stderr)
@@ -143,55 +160,89 @@ def extract_repo(url, output_path, quiet=False):
     owner, repo = parse_repo_slug(url)
     repo_full = f"{owner}/{repo}"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        repo_dir = Path(tmp) / "repo"
-        log(f"Cloning {url} (partial)...")
-        clone_partial(url, repo_dir)
+    # Set up timeout via SIGALRM
+    started = time.time()
+    timed_out = {"flag": False}
 
-        skill_files = find_skill_files_in_head(repo_dir)
-        log(f"Found {len(skill_files)} SKILL.md file(s) in HEAD")
+    def _alarm_handler(signum, frame):
+        timed_out["flag"] = True
+        raise RepoTimeoutError(
+            f"Repo {repo_full} exceeded {timeout}s timeout"
+        )
 
-        records = 0
-        with open(output_path, "w") as out:
-            for skill_path in skill_files:
-                history = get_file_history(repo_dir, skill_path)
-                log(f"  {skill_path}: {len(history)} commit(s)")
+    prev_handler = None
+    if timeout:
+        prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(int(timeout))
 
-                prev_sha = None
-                prev_content = None
-                for commit in history:
-                    sha = commit["sha"]
-                    content = get_blob_at_commit(repo_dir, sha, skill_path)
-                    if content is None:
-                        continue
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            log(f"Cloning {url} (partial)...")
+            clone_partial(url, repo_dir)
 
-                    added, removed = diff_numstat(repo_dir, prev_sha, sha, skill_path)
-                    char_delta = len(content) - (len(prev_content) if prev_content else 0)
+            skill_files = find_skill_files_in_head(repo_dir)
+            log(f"Found {len(skill_files)} SKILL.md file(s) in HEAD")
 
-                    record = {
-                        "repo": repo_full,
-                        "skill_path": skill_path,
-                        "skill_name": Path(skill_path).parent.name or Path(skill_path).stem,
-                        "before_sha": prev_sha,
-                        "after_sha": sha,
-                        "before_content": prev_content,
-                        "after_content": content,
-                        "commit_subject": commit["subject"],
-                        "commit_author": commit["author"],
-                        "commit_email": commit["email"],
-                        "commit_date": commit["date"],
-                        "lines_added": added,
-                        "lines_removed": removed,
-                        "char_delta": char_delta,
-                        "is_initial": prev_sha is None,
-                    }
-                    out.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    records += 1
-                    prev_sha = sha
-                    prev_content = content
+            records = 0
+            with open(output_path, "w") as out:
+                for skill_path in skill_files:
+                    # Cheap check: if we've gone over budget, bail before
+                    # starting a potentially-expensive history walk
+                    if timeout and (time.time() - started) > timeout:
+                        raise RepoTimeoutError(
+                            f"Repo {repo_full} timeout before processing {skill_path}"
+                        )
+                    history = get_file_history(repo_dir, skill_path)
+                    log(f"  {skill_path}: {len(history)} commit(s)")
 
-        log(f"\nWrote {records} record(s) to {output_path}")
-        return records
+                    prev_sha = None
+                    prev_content = None
+                    for commit in history:
+                        sha = commit["sha"]
+                        content = get_blob_at_commit(repo_dir, sha, skill_path)
+                        if content is None:
+                            continue
+
+                        added, removed = diff_numstat(repo_dir, prev_sha, sha, skill_path)
+                        char_delta = len(content) - (len(prev_content) if prev_content else 0)
+
+                        record = {
+                            "repo": repo_full,
+                            "skill_path": skill_path,
+                            "skill_name": Path(skill_path).parent.name or Path(skill_path).stem,
+                            "before_sha": prev_sha,
+                            "after_sha": sha,
+                            "before_content": prev_content,
+                            "after_content": content,
+                            "commit_subject": commit["subject"],
+                            "commit_author": commit["author"],
+                            "commit_email": commit["email"],
+                            "commit_date": commit["date"],
+                            "lines_added": added,
+                            "lines_removed": removed,
+                            "char_delta": char_delta,
+                            "is_initial": prev_sha is None,
+                        }
+                        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        records += 1
+                        prev_sha = sha
+                        prev_content = content
+
+            log(f"\nWrote {records} record(s) to {output_path}")
+            return records
+    except RepoTimeoutError:
+        # Clean up partial output on timeout
+        try:
+            Path(output_path).unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        if timeout:
+            signal.alarm(0)  # cancel
+            if prev_handler is not None:
+                signal.signal(signal.SIGALRM, prev_handler)
 
 
 def main():

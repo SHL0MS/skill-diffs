@@ -25,7 +25,7 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from extract import extract_repo as extract_skill_md
+from extract import extract_repo as extract_skill_md, DEFAULT_REPO_TIMEOUT_S
 from extract_cursor import extract_repo as extract_cursor
 
 
@@ -61,15 +61,21 @@ def append_manifest(manifest, entry):
 
 
 def process_one(args):
-    """Worker: extract one repo. args = (repo_full, raw_dir_str, extractor_name, platform)."""
-    repo_full, raw_dir_str, extractor_name, platform = args
+    """Worker: extract one repo. args = (repo_full, raw_dir_str, extractor_name, platform, timeout)."""
+    repo_full, raw_dir_str, extractor_name, platform, timeout = args
     raw_dir = Path(raw_dir_str)
     started = time.time()
     out = output_path(raw_dir, repo_full)
     try:
         repo_url = f"https://github.com/{repo_full}.git"
         extractor = EXTRACTORS[extractor_name]
-        records = extractor(repo_url, out, quiet=True)
+        # Pass timeout if extractor supports it (extract.py does;
+        # extract_cursor.py doesn't yet but should be added consistently)
+        try:
+            records = extractor(repo_url, out, quiet=True, timeout=timeout)
+        except TypeError:
+            # Extractor doesn't accept timeout kwarg
+            records = extractor(repo_url, out, quiet=True)
         return {
             "repo": repo_full,
             "platform": platform,
@@ -81,10 +87,11 @@ def process_one(args):
     except Exception as e:
         if out.exists():
             out.unlink()
+        is_timeout = type(e).__name__ == "RepoTimeoutError"
         return {
             "repo": repo_full,
             "platform": platform,
-            "status": "error",
+            "status": "timeout" if is_timeout else "error",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc(limit=3),
             "elapsed_s": round(time.time() - started, 2),
@@ -110,6 +117,8 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new", type=int, default=None)
     parser.add_argument("--retry-errors", action="store_true")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_REPO_TIMEOUT_S,
+                        help=f"Per-repo timeout in seconds (default: {DEFAULT_REPO_TIMEOUT_S}s = 30 min)")
     args = parser.parse_args()
 
     raw_dir = Path(args.output_dir) if args.output_dir else Path(f"data/raw_{args.platform}")
@@ -155,7 +164,8 @@ def main():
     total_records = 0
 
     worker_args = [
-        (r, str(raw_dir), args.extractor, args.platform) for r in pending
+        (r, str(raw_dir), args.extractor, args.platform, args.timeout)
+        for r in pending
     ]
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(process_one, w): w[0] for w in worker_args}
@@ -167,6 +177,10 @@ def main():
                 total_records += entry["records"]
                 marker = "OK"
                 detail = f"{entry['records']} records"
+            elif entry["status"] == "timeout":
+                n_err += 1
+                marker = "TIMEOUT"
+                detail = f"{entry['elapsed_s']}s"
             else:
                 n_err += 1
                 marker = "ERR"

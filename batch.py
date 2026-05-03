@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 # Reuse the extract function from our prototype
-from extract import extract_repo
+from extract import extract_repo, DEFAULT_REPO_TIMEOUT_S
 
 
 DATA_DIR = Path("data")
@@ -58,13 +58,17 @@ def append_manifest(entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def process_one(repo_full):
+def process_one(args):
     """Worker: extract one repo, return manifest entry."""
+    if isinstance(args, tuple):
+        repo_full, timeout = args
+    else:
+        repo_full, timeout = args, DEFAULT_REPO_TIMEOUT_S
     started = time.time()
     out = output_path(repo_full)
     try:
         repo_url = f"https://github.com/{repo_full}.git"
-        records = extract_repo(repo_url, out, quiet=True)
+        records = extract_repo(repo_url, out, quiet=True, timeout=timeout)
         elapsed = time.time() - started
         return {
             "repo": repo_full,
@@ -74,12 +78,12 @@ def process_one(repo_full):
             "output": str(out),
         }
     except Exception as e:
-        # Clean up partial output
         if out.exists():
             out.unlink()
+        is_timeout = type(e).__name__ == "RepoTimeoutError"
         return {
             "repo": repo_full,
-            "status": "error",
+            "status": "timeout" if is_timeout else "error",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc(limit=3),
             "elapsed_s": round(time.time() - started, 2),
@@ -99,6 +103,8 @@ def main():
                         help="Process at most this many NEW (unprocessed) repos this run")
     parser.add_argument("--retry-errors", action="store_true",
                         help="Retry repos that previously failed")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_REPO_TIMEOUT_S,
+                        help=f"Per-repo timeout in seconds (default: {DEFAULT_REPO_TIMEOUT_S}s = 30 min)")
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,7 +143,9 @@ def main():
     total_records = 0
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(process_one, r): r for r in pending}
+        futures = {
+            pool.submit(process_one, (r, args.timeout)): r for r in pending
+        }
         for i, future in enumerate(as_completed(futures), 1):
             entry = future.result()
             append_manifest(entry)
@@ -146,6 +154,10 @@ def main():
                 total_records += entry["records"]
                 marker = "OK"
                 detail = f"{entry['records']} records"
+            elif entry["status"] == "timeout":
+                n_err += 1
+                marker = "TIMEOUT"
+                detail = f"{entry['elapsed_s']}s"
             else:
                 n_err += 1
                 marker = "ERR"

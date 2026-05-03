@@ -240,14 +240,19 @@ def main():
                     tags.append("same_author_dup")
             r["quality_tags"] = tags
 
-        # Build new schema with extra columns
-        new_schema = pa.schema(
-            list(t.schema)
-            + [
-                pa.field("skill_cluster_id", pa.string()),
-                pa.field("is_canonical", pa.bool_()),
-            ]
-        )
+        # Build new schema with extra columns. If skill_cluster_id /
+        # is_canonical already exist (re-enrichment of an already-enriched
+        # parquet), drop them from the input schema to avoid duplicate fields.
+        existing_names = list(t.schema.names)
+        new_fields = [
+            f for f in t.schema
+            if f.name not in {"skill_cluster_id", "is_canonical"}
+        ]
+        new_fields.extend([
+            pa.field("skill_cluster_id", pa.string()),
+            pa.field("is_canonical", pa.bool_()),
+        ])
+        new_schema = pa.schema(new_fields)
         out_tmp = path.with_suffix(".tmp.parquet")
         pq.write_table(
             pa.Table.from_pylist(records, schema=new_schema),

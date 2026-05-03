@@ -63,11 +63,11 @@ A model trained specifically on `(before, intent, after)` triples should produce
 
 | Source | Records | Notes |
 |---|---|---|
-| `curator_training` config | 66,171 | Strict-clean + canonical + non-trivial intent. **Default training set.** |
+| `curator_training` config | 75,310 | Strict-clean + canonical + non-trivial intent. **Default training set.** |
 | `curator_eval_set` config | 200 | Held-out (seed=42), already filtered for quality. **Don't train on this.** |
-| `diffs_clean` config | 112,482 | Looser tier — includes records the curator subset filtered out. Use for ablations |
+| `diffs_clean` config | 130,631 | Looser tier — includes records the curator subset filtered out. Use for ablations |
 
-The 66k training records have ~3-5k chars of `before` + ~3-5k chars of `after` + ~30-200 chars of `intent_text`. Avg ~2-4k tokens per training example.
+The 75k training records have ~3-5k chars of `before` + ~3-5k chars of `after` + ~30-200 chars of `intent_text`. Avg ~2-4k tokens per training example.
 
 For DPO instead of SFT: the same `(before, after)` pairs work as `(rejected, chosen)`. The before is the "wrong" version (hadn't been edited yet), after is the human-corrected version. Skip the intent for vanilla DPO; use it as the prompt for instruction-conditioned DPO.
 
@@ -104,7 +104,7 @@ These are reasonable defaults — your team's standard SFT recipe is probably fi
 
 ### Cost estimate
 
-7B SFT on 66k examples × ~3k tokens × 2 epochs ≈ ~400M training tokens.
+7B SFT on 75k examples × ~3k tokens × 2 epochs ≈ ~450M training tokens.
 
 | Hardware | Approx wall time | Approx cost |
 |---|---|---|
