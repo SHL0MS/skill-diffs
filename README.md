@@ -17,7 +17,7 @@ The May 2026 snapshot covers **4 platforms** (Anthropic Claude, OpenClaw, OpenCo
 - **75,310 records in `curator_training.parquet`** — recommended default training subset for skill-edit / curator models (strict-clean + canonical + non-trivial intent)
 - **38,010 records in `curator_training_strict.parquet`** — stricter tier that also requires SPDX license + no PII + no placeholder content + engaged-repo signal. Use this if you plan to publish a model trained on the data.
 - **76,142 records with PR title + body** as intent labels (7.7% full / 18.8% of the clean tier — richer than commit subjects alone)
-- **415,506 bundled-resource snapshots** (Anthropic platform only — needs v0.5 refresh for new platforms)
+- **630,119 bundled-resource snapshots** with sibling files (scripts/, references/, assets/) — v0.5 covers all 4 platforms (415k Anthropic + 215k new platforms)
 
 See `data/release/README.md` for the full data card.
 
@@ -42,12 +42,12 @@ bundled = load_dataset("shl0ms/skill-diffs", "bundled", split="train")
 
 ## Why
 
-Agent skills are a rare kind of training data: structured procedural specs iteratively refined through human feedback. Existing public datasets capture *snapshots*; this one captures the **evolution** — every commit-by-commit revision with diffs, commit messages, **PR titles + bodies (where available)**, and authorship metadata.
+Agent skills are a rare kind of training data: structured procedural specs that get iteratively refined through merged commits in public repos. Authorship is heterogeneous (humans, agents like Claude Code / Cursor / Copilot, and human-AI collaborations) — we don't distinguish. Existing public datasets capture *snapshots*; this one captures the **evolution** — every commit-by-commit revision with diffs, commit messages, **PR titles + bodies (where available)**, and authorship metadata.
 
 Use cases:
 
 - **Skill-editor / Curator model training** — see `curator_training.parquet`. Designed for fine-tuning a model that takes `(before_skill, intent_text)` and produces the patched skill. Drops in as the LLM review pass for [Hermes Agent's Curator](https://hermes-agent.nousresearch.com/docs/user-guide/features/curator) or any equivalent maintenance loop.
-- **DPO / preference-pair training** — `(before, after)` where `after` is the human-corrected version
+- **DPO / preference-pair training** — `(before, after)` where `after` is the merged version (authorship varies)
 - **Pattern mining** — what kinds of edits are most common in skill iteration (frontmatter fixes, model name updates, code-block language tags)
 - **Initial-state generation** — `skills_initial.parquet` for "create a skill from scratch" training
 - **Cross-platform analysis** — `platform` column lets you compare conventions between Anthropic, OpenClaw, OpenCode, and Hermes Agent skill formats
@@ -120,6 +120,12 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 | `extract_bundled.py` | Capture sibling files (scripts/, references/) from skill folders (v0.3 only — needs v0.5 refresh) |
 | `curator_subset.py` | Derive `curator_training.parquet` from the full corpus (default + `--strict` mode for the strict variant) |
 | `add_quality_v041.py` | Apply 4 v0.4.2 quality tags (no_license, low_engagement, placeholder_content, pii_email) to release parquets. Idempotent. |
+| `add_semantic_diff.py` | (v0.5) Add structured `diff_summary` column with edit_kind taxonomy. Idempotent. |
+| `add_injection_tag.py` | (v0.5) Flag prompt-injection-style content with `prompt_injection_pattern` quality tag. Idempotent. |
+| `add_quality_score.py` | (v0.5) Add aggregate `quality_score` (0.0-1.0) derived from license + stars + tags + intent + length. Must run last. Idempotent. |
+| `embed_cluster.py` | (v0.5) BAAI/bge-small-en-v1.5 embeddings + FAISS cosine clustering at 0.85 threshold. Outputs `data/embeddings.parquet` + `data/semantic_clusters.parquet` |
+| `add_semantic_clusters.py` | (v0.5) Merge `skill_semantic_cluster_id` + `is_semantic_canonical` into release parquets |
+| `build_eval_set.py` | (v0.5) Build stratified `curator_eval_set_v2.parquet` (50 per intent × 5 classes = 250) |
 | `skill_linter.py` | Rule-based linter for SKILL.md (13 rules; CLI tool + report mode) |
 | `eval_curator.py` | Held-out skill-patch eval harness; identity / intent_only / API-model adapters |
 | `finish_v04.sh` | Orchestrates the full enrichment chain after batch jobs finish |
@@ -155,10 +161,11 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 
 ## Status
 
-- **v0.4.2 (current)** — 4 new `quality_tags` (`no_license`, `low_engagement`, `placeholder_content`, `pii_email`); `curator_training_strict.parquet` (38k records) for redistribution-safe / publishable training
+- **v0.5 (current)** — semantic clustering (BAAI/bge-small-en-v1.5; 47k unique clusters catching cross-author dups MinHash misses); `diff_summary` structural edit-type column (`frontmatter_only` / `structural` / `body_only` / etc.); aggregate `quality_score` column; `prompt_injection_pattern` advisory tag; bundled.parquet refresh covering all 4 platforms; stratified eval set (`curator_eval_set_v2.parquet`); LLM-as-judge + linter_delta correctness metric; honest reframing that the gold AFTER is the merged-edit (not "human-written")
+- **v0.4.2** — 4 new `quality_tags` (`no_license`, `low_engagement`, `placeholder_content`, `pii_email`); `curator_training_strict.parquet` (38k records) for redistribution-safe / publishable training
 - **v0.4.1** — adds OpenClaw platform (1,631 repos, +18k clean diff pairs); per-repo timeout in `extract.py` to prevent monorepo straggler hangs
 - **v0.4** — PR title+body metadata; multi-platform expansion (Anthropic + Hermes Agent + OpenCode); `curator_training.parquet` + skill linter + eval scaffold
 - **v0.3** — MinHash skill clustering, frontmatter validation, same-author dedup, SPDX license metadata
 - **v0.2** — bundled resources (skill folder sibling files) captured via tarball API
 - **v0.1** — diff dataset with full LLM-augmented intent classification
-- **v0.5 (planned)** — Cursor corpus expansion (discovery completed, extraction deferred); embedding-based semantic clustering; bundled.parquet refresh for new platforms; PR-commit-list deep matching (currently only catches squash + head SHAs, achieving 7.7% full / 18.8% clean-tier coverage)
+- **v0.6 (planned)** — Cursor corpus extraction (discovery completed in v0.4.1); PR-commit-list deep matching (currently only catches squash + head SHAs, achieving 7.7% full / 18.8% clean-tier coverage); refined task-specific intent labels via LLM relabeling (e.g. `frontmatter_fix`, `outdated_model_update`, `add_section`); consolidations.parquet derived from cluster history; analysis notebook

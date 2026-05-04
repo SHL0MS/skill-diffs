@@ -3,7 +3,7 @@
 
 Derived from the most common defect patterns observed across the skill-diffs
 corpus (PR titles like "fix YAML frontmatter", "update outdated model names",
-"add language tags to code blocks" reveal what humans actually fix).
+"add language tags to code blocks" reveal what skill maintainers actually fix in merged commits).
 
 Designed to be:
   - Fast (no LLM, no clone, no network)

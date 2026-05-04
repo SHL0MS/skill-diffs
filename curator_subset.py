@@ -181,12 +181,15 @@ def main():
         "intent_text",
         "commit_subject",
     ]
-    # Optional columns (present after consolidate_v04 + enrich_v03 + join_pr_metadata + add_licenses)
+    # Optional columns (present after consolidate_v04 + enrich_v03 + join_pr_metadata + add_licenses + v0.5 enrichments)
     optional_cols = [
         "platform", "pr_number", "pr_title", "pr_body", "pr_state", "pr_match_kind",
         "intent_class", "intent_confidence", "intent_source",
         "lines_added", "lines_removed", "char_delta",
         "skill_cluster_id", "is_canonical",
+        "skill_semantic_cluster_id", "is_semantic_canonical",  # v0.5
+        "diff_summary",                                          # v0.5
+        "quality_score",                                         # v0.5
         "license_spdx", "stars", "source_seed", "quality_tags",
     ]
     for c in optional_cols:

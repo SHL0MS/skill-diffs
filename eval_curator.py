@@ -2,7 +2,7 @@
 """Held-out eval for the curator skill-patch task.
 
 Task definition:
-    Given a skill (BEFORE) and a human-written intent label (commit_subject
+    Given a skill (BEFORE) and the maintainer-stated intent label (commit_subject
     or PR title), produce the patched skill (AFTER).
 
 Input:  curator_training.parquet -> sample N held-out triples
@@ -304,12 +304,133 @@ def metric_semantic_cosine(pred: str, gold: str) -> float:
     return float((embs[0] * embs[1]).sum())
 
 
+def metric_linter_delta(pred: str, gold: str) -> float:
+    """Objective correctness signal: (# linter findings on gold) - (# linter findings on pred).
+
+    > 0  pred has FEWER defects than gold (pred objectively better on the rules)
+    = 0  pred matches gold's defect profile
+    < 0  pred introduced new defects relative to gold
+
+    Uses skill_linter.py's 13 rule-based checks (no LLM, no network).
+    Independent of who authored the gold — this is real correctness, not
+    imitation quality. Pairs with edit_dist/rouge_l/judge as a complementary
+    signal.
+    """
+    from skill_linter import lint_content
+    n_gold = len(lint_content(gold)) if gold else 0
+    n_pred = len(lint_content(pred)) if pred else 0
+    return float(n_gold - n_pred)
+
+
 METRICS = [
     ("exact_match", metric_exact_match),
     ("edit_dist_ratio", metric_edit_distance_ratio),
     ("rouge_l", metric_rouge_l),
     ("semantic_cosine", metric_semantic_cosine),
+    ("linter_delta", metric_linter_delta),
 ]
+
+
+# === LLM-as-judge metric ===
+
+JUDGE_PROMPT_TEMPLATE = """You are evaluating an automated skill-edit model.
+
+The model was given a SKILL.md file ("BEFORE") and a maintainer-stated intent ("INTENT"),
+and asked to produce the patched skill ("PRED"). The actual merged version of the
+edit (which may have been authored by a human, an AI agent, or a collaboration
+between them — we don't reliably distinguish) is provided as the reference ("GOLD").
+
+Score the model's prediction on three dimensions, 0-2 each:
+
+  faithfulness: Did it apply the requested change?
+    0 = ignored or contradicted the intent
+    1 = partially applied
+    2 = fully and correctly applied
+  preservation: Did it preserve content unrelated to the intent?
+    0 = significantly altered or lost unrelated content
+    1 = minor unintended changes
+    2 = clean — only the intended change
+  format: Is YAML frontmatter and document structure correct?
+    0 = broken YAML, missing fields, malformed structure
+    1 = minor formatting issues
+    2 = clean
+
+Then give an overall judgment (0-5):
+  0 = severely flawed
+  1-2 = poor
+  3 = passable
+  4 = good
+  5 = matches or improves on the gold
+
+Respond with ONLY a JSON object on a single line, no other text, no markdown fences:
+JSON_EXAMPLE: {"faithfulness": 2, "preservation": 2, "format": 2, "overall": 5, "rationale": "..."}
+
+INTENT:
+__INTENT__
+
+BEFORE:
+__BEFORE__
+
+GOLD (merged-edit reference):
+__GOLD__
+
+PRED (model output):
+__PRED__
+"""
+
+
+def _build_judge_prompt(intent, before, gold, pred):
+    """Avoid str.format() because the example JSON in the template contains
+    literal curly braces that would otherwise be interpreted as format keys."""
+    return (
+        JUDGE_PROMPT_TEMPLATE
+        .replace("__INTENT__", intent)
+        .replace("__BEFORE__", before)
+        .replace("__GOLD__", gold)
+        .replace("__PRED__", pred)
+    )
+
+
+def metric_llm_judge(pred: str, gold: str, intent: str = "", before: str = "",
+                    judge_model: str = "claude-sonnet-4-5") -> dict:
+    """Returns dict of {faithfulness, preservation, format, overall, rationale}.
+    Each score field is float 0-N. Cached calls — same args produce same scores."""
+    import json as _json
+    from anthropic import Anthropic
+
+    api_key = _keychain_get("ANTHROPIC_WORK", "opencode") \
+              or _keychain_get("anthropic", "API_KEY") \
+              or os.environ.get("ANTHROPIC_API_KEY")
+    client = Anthropic(api_key=api_key) if api_key else Anthropic()
+
+    # Truncate very long inputs to fit in context (target ~30k tokens total)
+    def trunc(s, n):
+        return s[:n] if s else ""
+    prompt = _build_judge_prompt(
+        trunc(intent, 4000),
+        trunc(before, 12000),
+        trunc(gold, 12000),
+        trunc(pred, 12000),
+    )
+
+    resp = client.messages.create(
+        model=judge_model,
+        max_tokens=400,
+        temperature=0.0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        scored = _json.loads(text)
+    except _json.JSONDecodeError:
+        # Best-effort regex extraction
+        scored = {"faithfulness": 0, "preservation": 0, "format": 0,
+                  "overall": 0, "rationale": f"PARSE FAIL: {text[:200]}"}
+    return scored
 
 
 # === Eval loop ===
@@ -326,7 +447,8 @@ class Result:
     error: Optional[str] = None
 
 
-def run_eval(eval_set, model_fn, model_label, output_predictions=False, limit=None):
+def run_eval(eval_set, model_fn, model_label, output_predictions=False,
+             limit=None, run_judge=False, judge_model="claude-sonnet-4-5"):
     if limit:
         eval_set = eval_set[:limit]
     results = []
@@ -356,35 +478,80 @@ def run_eval(eval_set, model_fn, model_label, output_predictions=False, limit=No
             except Exception as e:
                 scores[name] = float("nan")
                 print(f"    metric {name} crashed: {e}", file=sys.stderr)
-        results.append(Result(
+
+        # Optional LLM-as-judge metric
+        judge_scores = None
+        if run_judge:
+            try:
+                judge_scores = metric_llm_judge(
+                    pred, gold, intent=ex.get("intent_text") or "",
+                    before=ex.get("before_content") or "",
+                    judge_model=judge_model,
+                )
+                # Flatten judge scores into scores dict for consistency
+                for k, v in judge_scores.items():
+                    if isinstance(v, (int, float)):
+                        scores[f"judge_{k}"] = float(v)
+            except Exception as e:
+                print(f"    judge crashed: {type(e).__name__}: {str(e)[:100]}",
+                      file=sys.stderr)
+
+        result = Result(
             pair_id=ex["pair_id"], repo=ex["repo"],
             skill_name=ex.get("skill_name") or "",
             intent_text=ex.get("intent_text") or "",
             metrics=scores,
             pred_len=len(pred), gold_len=len(gold),
-        ))
+        )
+        if judge_scores:
+            result.__dict__["judge"] = judge_scores
+        results.append(result)
 
         if output_predictions:
-            # Store predicted text alongside
             results[-1].__dict__["prediction"] = pred
 
+        # Stratified per-class display if eval set has intent_class
         if i % 10 == 0 or i == len(eval_set):
             elapsed = time.time() - started
             rate = i / elapsed if elapsed > 0 else 0
             eta = (len(eval_set) - i) / rate if rate > 0 else 0
-            print(f"  [{i}/{len(eval_set)}] {rate:.1f}/s eta={int(eta)}s",
+            print(f"  [{i}/{len(eval_set)}] {rate:.2f}/s eta={int(eta)}s",
                   file=sys.stderr)
 
     # Aggregate
     n = len([r for r in results if r.error is None])
     summary = {"n_eval": len(results), "n_ok": n, "model": model_label}
-    for name, _ in METRICS:
-        vals = [r.metrics[name] for r in results if r.error is None]
+    metric_names = [m for m, _ in METRICS]
+    if run_judge:
+        metric_names.extend([
+            "judge_faithfulness", "judge_preservation",
+            "judge_format", "judge_overall",
+        ])
+    for name in metric_names:
+        vals = [r.metrics.get(name) for r in results
+                if r.error is None and r.metrics.get(name) is not None]
+        vals = [v for v in vals if v == v]  # drop NaN
         if vals:
             avg = sum(vals) / len(vals)
             summary[f"{name}_mean"] = round(avg, 4)
         else:
             summary[f"{name}_mean"] = None
+
+    # Stratified by intent_class if available
+    by_class = {}
+    for ex, r in zip(eval_set[:len(results)], results):
+        ic = ex.get("intent_class") or "unknown"
+        by_class.setdefault(ic, []).append(r)
+    summary["per_class"] = {}
+    for ic, recs in by_class.items():
+        n_ok_class = len([r for r in recs if r.error is None])
+        cls_summary = {"n": len(recs), "n_ok": n_ok_class}
+        for name in metric_names:
+            vals = [r.metrics.get(name) for r in recs
+                    if r.error is None and r.metrics.get(name) is not None]
+            vals = [v for v in vals if v == v]
+            cls_summary[f"{name}_mean"] = round(sum(vals)/len(vals), 4) if vals else None
+        summary["per_class"][ic] = cls_summary
 
     return summary, results
 
@@ -405,6 +572,11 @@ def main():
                         help="Save predictions alongside scores")
     parser.add_argument("--limit", type=int, default=None,
                         help="Run on first N eval items only (for smoke tests)")
+    parser.add_argument("--judge", action="store_true",
+                        help="Also run LLM-as-judge metric (Claude Sonnet 4.5 by default). "
+                             "Adds ~$25-50 cost on full 250-example eval set.")
+    parser.add_argument("--judge-model", default="claude-sonnet-4-5",
+                        help="Judge model (Anthropic API)")
     args = parser.parse_args()
 
     if args.sample_eval_set:
@@ -437,6 +609,8 @@ def main():
         eval_set, model_fn, args.model,
         output_predictions=args.output_predictions,
         limit=args.limit,
+        run_judge=args.judge,
+        judge_model=args.judge_model,
     )
 
     # Print summary
@@ -444,13 +618,40 @@ def main():
     print(f"  Model: {summary['model']}")
     print(f"  N: {summary['n_eval']} (ok: {summary['n_ok']})")
     print()
-    for name, _ in METRICS:
+    metric_keys = [m for m, _ in METRICS]
+    if args.judge:
+        metric_keys.extend([
+            "judge_faithfulness", "judge_preservation",
+            "judge_format", "judge_overall",
+        ])
+    for name in metric_keys:
         v = summary.get(f"{name}_mean")
         if v is None:
-            print(f"  {name:<20} —")
+            print(f"  {name:<22} —")
         else:
-            print(f"  {name:<20} {v:.4f}")
+            print(f"  {name:<22} {v:.4f}")
     print("=" * 60)
+
+    # Per-class breakdown if available
+    per_class = summary.get("per_class", {})
+    if len(per_class) > 1:
+        print("\nPer intent_class:")
+        # Pick one or two key metrics for compact display
+        key_metrics = ["edit_dist_ratio", "rouge_l"]
+        if args.judge:
+            key_metrics.append("judge_overall")
+        header = "  " + "{:<12}".format("class") + "{:>6}".format("n") + "  " + \
+                 "  ".join("{:<22}".format(m) for m in key_metrics)
+        print(header)
+        for ic, cls_s in sorted(per_class.items(), key=lambda x: -x[1]["n"]):
+            row = "  " + "{:<12}".format(ic) + "{:>6}".format(cls_s["n"]) + "  "
+            for m in key_metrics:
+                val = cls_s.get(f"{m}_mean")
+                if val is None:
+                    row += "{:<22}".format("—")
+                else:
+                    row += "{:<22}".format(f"{val:.4f}")
+            print(row)
 
     # Save full results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

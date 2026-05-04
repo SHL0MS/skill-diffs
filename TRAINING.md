@@ -33,29 +33,32 @@ train_chat = train.map(to_chat, remove_columns=train.column_names)
 
 Given:
 - `before_content` — the current SKILL.md file content (typically 1-5k chars)
-- `intent_text` — a human-written description of what to change (PR title preferred, falls back to commit subject)
+- `intent_text` — the maintainer-stated description of what to change (PR title preferred, falls back to commit subject)
 
 Produce:
 - `after_content` — the patched SKILL.md
 
 Stays SKILL.md format. Preserves YAML frontmatter, structure, and unrelated content. Only applies the intent.
 
-## Why a fine-tune should beat generic aux models
+> **Note on the "ground truth" AFTER:** The `after_content` in this corpus represents *edits that got merged into a public skill repo* — a mix of human-authored edits, LLM-authored edits (Claude, Copilot, Cursor, etc.), and human-AI-collaborative edits. We don't reliably distinguish authorship. ~49% of records that have a PR body show explicit AI-coauthor signatures, but this undercounts because most agent-assisted edits don't carry signatures. **The eval below measures relative imitation quality, not absolute correctness.** A strong score means "matches the merged-edit distribution"; it does *not* mean "matches a human expert's correct answer." For an objective correctness signal, see the `linter_delta` metric described below.
 
-The eval baselines on a held-out 200-example set:
+## Why a fine-tune is worth doing
 
-| Model | exact_match | edit_dist_ratio | rouge_l | semantic_cosine |
-|---|---|---|---|---|
-| `identity` (return BEFORE unchanged) | 0.0000 | **0.8431** | **0.8728** | 0.9859 |
-| `intent_only` (return only intent) | 0.0000 | 0.0043 | 0.0081 | 0.6264 |
-| `claude-haiku-4-5` | 0.0100 | 0.7701 | 0.8234 | 0.9819 |
+Two reasons:
 
-**Haiku 4.5 is *worse than identity* on lexical metrics** despite making changes. It picks up the right semantic territory (cosine 0.98) but applies the wrong surface edits (edit_dist 0.77 vs 0.84 for no-op). This is a strong signal that:
-- Generic aux models don't know the actual *edit distribution* humans make on skills
-- They over-rewrite (haiku tends to expand/rephrase rather than make minimal targeted patches)
-- They're inconsistent on YAML frontmatter handling
+**1. Cost / latency.** A 7B fine-tune at ~1s + ~$0.001 per call replaces a generic aux model at ~30s + ~$0.04 per call. Even if the fine-tune merely *matches* a frontier model's score, the unit economics make it shippable for production Curator where the aux is invoked frequently in the background.
 
-A model trained specifically on `(before, intent, after)` triples should produce minimal-targeted edits. Beating Haiku on edit_dist_ratio is the bar.
+**2. Distribution match.** From the v0.4.1 baselines on the original 200-sample eval (numbers will be refreshed in the v0.5 stratified eval below):
+
+| Model | edit_dist_ratio | rouge_l | semantic_cosine |
+|---|---|---|---|
+| `identity` (return BEFORE unchanged) | **0.8431** | **0.8728** | 0.9859 |
+| `intent_only` (return only intent) | 0.0043 | 0.0081 | 0.6264 |
+| `claude-haiku-4-5` | 0.7701 | 0.8234 | 0.9819 |
+
+**Haiku 4.5 is worse than identity on lexical metrics**. Haiku stays on-topic (cosine 0.98) but its surface edits drift further from the merged-edit distribution than no-op does. The corpus is dominated by edits matching the *style* of skill maintainers — and Haiku's prior doesn't match that style. A small fine-tune absorbs the style; a 7B model that hits identity-level edit_dist while actually making the requested change is a meaningful improvement over Haiku.
+
+> **What the eval does NOT claim.** It's not "humans wrote the gold AFTER, so your model should match human quality." It's *"this is what got merged into public skill repos (in practice often LLM-assisted), and your job is to match that distribution at lower inference cost."* Whether the merged edits are *correct* in an absolute sense is a separate question — see `linter_delta` for an objective correctness signal that doesn't depend on the gold being optimal.
 
 ## Recommended training setup
 
@@ -70,7 +73,7 @@ A model trained specifically on `(before, intent, after)` triples should produce
 
 The 75k training records have ~3-5k chars of `before` + ~3-5k chars of `after` + ~30-200 chars of `intent_text`. Avg ~2-4k tokens per training example.
 
-For DPO instead of SFT: the same `(before, after)` pairs work as `(rejected, chosen)`. The before is the "wrong" version (hadn't been edited yet), after is the human-corrected version. Skip the intent for vanilla DPO; use it as the prompt for instruction-conditioned DPO.
+For DPO instead of SFT: the same `(before, after)` pairs work as `(rejected, chosen)`. The before is the pre-merge state, after is the merged version (authorship varies — see framing note above). Skip the intent for vanilla DPO; use it as the prompt for instruction-conditioned DPO.
 
 ### Filtering for higher quality (optional)
 
@@ -92,7 +95,28 @@ small_edits = train.filter(
 
 # Only specific intent classes (drop docs/chore/refactor for fix+feat focus)
 focused = train.filter(lambda r: r["intent_class"] in {"fix", "feat", "refactor"})
+
+# v0.5: top quality records only (uses aggregate quality_score)
+top = train.filter(lambda r: r["quality_score"] >= 0.7)  # ~9k highest-quality
+
+# v0.5: dedupe across authors (semantic clustering catches forks + re-implementations)
+unique = train.filter(lambda r: r["is_semantic_canonical"])
+
+# v0.5: filter by edit type — e.g. only frontmatter fixes for narrow training
+frontmatter_only = train.filter(
+    lambda r: r["diff_summary"]["edit_kind"] == "frontmatter_only"
+)
 ```
+
+### v0.5 columns worth knowing about
+
+| Column | Use |
+|---|---|
+| `skill_semantic_cluster_id` | Embedding-based cluster id. 47k unique clusters (vs MinHash's 175k). Catches **independent re-implementations** that MinHash misses. |
+| `is_semantic_canonical` | True for the canonical skill in each semantic cluster. ~7.5% of records. Use this for the strictest cross-author dedup. |
+| `diff_summary` | Struct with `edit_kind` (frontmatter_only / body_only / structural / code_only / both / trivial / addition / deletion) plus char counts and section deltas. Filter to specific edit types or compute structural metrics. |
+| `quality_score` | Aggregate 0.0-1.0 score from license + stars + tags + intent + length signals. Lets you do `df.filter(quality_score >= 0.7)` for top-quartile (~9.6%) without writing custom logic. |
+| `prompt_injection_pattern` (in `quality_tags`) | Advisory flag for content matching prompt-injection patterns (~0.27% of records, mostly defensive content in security skills). |
 
 ### Hyperparameters (starting points)
 
@@ -144,16 +168,32 @@ Output: per-metric scores + `data/eval_results/<timestamp>__yourstack_hermes-3-7
 
 ### Bar to clear
 
-| Metric | identity | haiku | What to beat |
+Baselines on the v0.5 stratified eval set (250 examples, 50 per intent class):
+
+**Imitation metrics** — "does the output match the merged-edit distribution?"
+
+| Metric | identity | haiku | sonnet | What to aim for |
+|---|---|---|---|---|
+| `edit_dist_ratio` | **0.8169** | 0.7771 | 0.7520 | **>0.82 = beats identity** |
+| `rouge_l` | **0.8596** | 0.8311 | 0.8187 | **>0.86 = beats identity** |
+| `judge_overall` (Sonnet judge, 0-5) | 1.00 | 2.08 | **2.30** | **>2.3 = matches Sonnet ceiling** |
+| `intent_only` floor | edit_dist 0.005, judge 0.38 — sanity floor only |
+
+**Correctness metric** — independent of who authored the gold. Pure rule-based:
+
+| Metric | identity | sonnet | What it means |
 |---|---|---|---|
-| `edit_dist_ratio` | 0.8431 | 0.7701 | **>0.85 = beats identity → meaningful patches** |
-| `rouge_l` | 0.8728 | 0.8234 | **>0.87 = beats identity** |
-| `semantic_cosine` | 0.9859 | 0.9819 | maintain >0.98 (don't drift) |
-| `exact_match` | 0.0000 | 0.0100 | >0.05 ideally (5% of patches exactly correct) |
+| `linter_delta` | +0.024 | -0.036 | `(# findings on gold) - (# findings on pred)`. **Positive = pred objectively cleaner than gold**. Identity is slightly cleaner than gold; Sonnet introduces a tiny number of new defects. |
 
-The lexical metrics (`edit_dist`, `rouge_l`) are what to optimize for — they reward *targeted* edits over *expansive* edits. Semantic cosine is mostly saturated (everything's close in embedding space because most edits are small) so don't read too much into it.
+**The fine-tune target:** simultaneously **edit_dist > 0.82** (matches identity, makes targeted edits) AND **judge_overall > 2.3** (matches Sonnet ceiling on faithfulness). Neither Haiku nor Sonnet does both — Haiku/Sonnet trade lexical match for judge quality. A small fine-tune trained on the corpus's edit distribution can plausibly do both at once.
 
-For a more discriminative metric: add LLM-as-judge with a stronger model (Sonnet 4.5 or GPT-4o) comparing prediction vs gold and asking "which is the more faithful application of the requested change." Not built into `eval_curator.py` yet — would be a useful v0.5 addition.
+The linter rules are deterministic (frontmatter validity, code-block language tags, deprecated model references like `gpt-3.5-turbo`, legacy API calls, placeholder content, etc.). A model that achieves `linter_delta > 0` produces output with FEWER defects than the merged-edit baseline — that's a real win regardless of how the gold was authored.
+
+**Suggested optimization target:**
+- Lexical metrics + judge: aim to *match* identity baseline while making real changes (keeps style consistent)
+- `linter_delta`: aim to be slightly positive (improve on the gold's defect rate)
+
+The lexical metrics reward *targeted* edits over *expansive* ones. Semantic cosine is saturated for most pairs (everything's close in embedding space because most edits are small) so don't read too much into single-decimal-point differences there.
 
 ## Common failure modes to watch for in eval
 
