@@ -103,7 +103,7 @@ Each phase is resumable (manifest-based for batch jobs, per-repo cache for API f
 
 ## Files
 
-### v0.4 current (use these)
+### v0.5 current (use these)
 
 | File | Purpose |
 |---|---|

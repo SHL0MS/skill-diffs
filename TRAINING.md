@@ -48,15 +48,18 @@ Two reasons:
 
 **1. Cost / latency.** A 7B fine-tune at ~1s + ~$0.001 per call replaces a generic aux model at ~30s + ~$0.04 per call. Even if the fine-tune merely *matches* a frontier model's score, the unit economics make it shippable for production Curator where the aux is invoked frequently in the background.
 
-**2. Distribution match.** From the v0.4.1 baselines on the original 200-sample eval (numbers will be refreshed in the v0.5 stratified eval below):
+**2. Distribution match.** From the v0.5 baselines on the stratified 250-example eval (50 per intent class):
 
-| Model | edit_dist_ratio | rouge_l | semantic_cosine |
+| Model | edit_dist_ratio | rouge_l | judge_overall (0-5) |
 |---|---|---|---|
-| `identity` (return BEFORE unchanged) | **0.8431** | **0.8728** | 0.9859 |
-| `intent_only` (return only intent) | 0.0043 | 0.0081 | 0.6264 |
-| `claude-haiku-4-5` | 0.7701 | 0.8234 | 0.9819 |
+| `identity` (return BEFORE unchanged) | **0.8169** | **0.8596** | 1.00 |
+| `intent_only` (return only intent) | 0.0047 | 0.0086 | 0.38 |
+| `claude-haiku-4-5` | 0.7771 | 0.8311 | 2.08 |
+| `claude-sonnet-4-5` | 0.7520 | 0.8187 | **2.30** |
 
-**Haiku 4.5 is worse than identity on lexical metrics**. Haiku stays on-topic (cosine 0.98) but its surface edits drift further from the merged-edit distribution than no-op does. The corpus is dominated by edits matching the *style* of skill maintainers — and Haiku's prior doesn't match that style. A small fine-tune absorbs the style; a 7B model that hits identity-level edit_dist while actually making the requested change is a meaningful improvement over Haiku.
+**Bigger model → higher judge score, lower lexical match.** Sonnet wins judge_overall (judge correctly recognizes real edits as more valuable than no-op) but loses on edit_dist (frontier models over-rewrite). Haiku and Sonnet both *underperform identity on lexical metrics* — the corpus has a particular edit style that generic prompting doesn't reproduce.
+
+A small fine-tune trained on the corpus's edit distribution can plausibly do both at once: hit identity-level edit_dist (>0.82) AND Sonnet-level judge_overall (>2.30). Neither generic aux currently does both.
 
 > **What the eval does NOT claim.** It's not "humans wrote the gold AFTER, so your model should match human quality." It's *"this is what got merged into public skill repos (in practice often LLM-assisted), and your job is to match that distribution at lower inference cost."* Whether the merged edits are *correct* in an absolute sense is a separate question — see `linter_delta` for an objective correctness signal that doesn't depend on the gold being optimal.
 
